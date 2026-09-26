@@ -1652,6 +1652,101 @@ async function standaloneUpload(data, opts) {
   const url = await fileToDataUrl(blob, 1024);
   return { url, size: blob.size || url.length, error: null, deletionUrl: null };
 }
+standaloneUpload.isStandalone = true;
+window.__brasaStandalone = true;
+
+/* Sincronizar de volta: manda o conteúdo atual (o que está no navegador)
+   para o content.json do repositório. O token fica SÓ neste navegador
+   (mesma caixinha do "Publicar no GitHub") — nunca no código. */
+function syncB64(str) {
+  const u8 = new TextEncoder().encode(str);
+  let s = "";
+  const CH = 0x8000;
+  for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+  return btoa(s);
+}
+
+async function syncGh(path, token, opts) {
+  const o = opts || {};
+  const r = await fetch("https://api.github.com" + path, {
+    method: o.method || "GET",
+    body: o.body,
+    headers: Object.assign({
+      Accept: "application/vnd.github+json",
+      Authorization: "Bearer " + token,
+      "X-GitHub-Api-Version": "2022-11-28"
+    }, o.headers || {})
+  });
+  let data = null;
+  try { data = await r.json(); } catch (e) { }
+  if (!r.ok) throw new Error("HTTP " + r.status + ": " + ((data && data.message) || ("HTTP " + r.status)));
+  return data;
+}
+
+window.__brasaSync = async function () {
+  const toastFn = (window.brasa && window.brasa.toast) || ((m) => alert(m));
+  const st = (window.brasa && window.brasa.state) || null;
+  if (!st || !st.content) { toastFn("Abra o site primeiro."); return; }
+  let cfg = {};
+  try { cfg = JSON.parse(localStorage.getItem("brasa.github") || "{}"); } catch (e) { }
+  const r = document.getElementById("modalRoot");
+  const escAttr = (s) => String(s == null ? "" : s).replace(/[<>&"]/g, "");
+  r.innerHTML =
+    '<div class="modal" role="dialog">' +
+      '<h3>Sincronizar com o GitHub</h3>' +
+      '<p>Envia as edições feitas aqui para o <b>content.json</b> do repositório — aí todos os visitantes veem o novo conteúdo. O token fica <b>só neste navegador</b>.</p>' +
+      '<div class="pub-form">' +
+        '<label>Repositório (dono/nome)<input id="syncRepo" value="' + escAttr(cfg.repo) + '" autocomplete="off"></label>' +
+        '<label>Token de acesso<input id="syncToken" type="password" value="' + escAttr(cfg.token) + '" autocomplete="off"></label>' +
+      '</div>' +
+      '<div class="pub-status" id="syncStatus"></div>' +
+      '<div class="modal-actions">' +
+        '<button class="btn btn-ghost btn-sm" id="syncCancel">Fechar</button>' +
+        '<button class="btn btn-primary btn-sm" id="syncGo">Enviar alterações</button>' +
+      '</div>' +
+    '</div>';
+  r.classList.add("on");
+  const close = () => { r.classList.remove("on"); r.innerHTML = ""; };
+  document.getElementById("syncCancel").addEventListener("click", close);
+  r.onmousedown = (ev) => { if (ev.target === r) close(); };
+  document.getElementById("syncGo").addEventListener("click", async () => {
+    const repo = (document.getElementById("syncRepo").value || "").trim();
+    const token = (document.getElementById("syncToken").value || "").trim();
+    const sel = document.getElementById("syncStatus");
+    try { localStorage.setItem("brasa.github", JSON.stringify({ repo, token })); } catch (e) { }
+    if (!/^[^/s]+/[^/s]+$/.test(repo)) { sel.textContent = "Confira o repositório: use o formato dono/nome."; return; }
+    if (!token) { sel.textContent = "Cole o token."; return; }
+    const btn = document.getElementById("syncGo");
+    btn.disabled = true;
+    try {
+      sel.textContent = "Localizando o repositório…";
+      let branch = "main";
+      try {
+        const info = await syncGh("/repos/" + repo, token);
+        if (info && info.default_branch) branch = info.default_branch;
+      } catch (e) { /* segue no main */ }
+      sel.textContent = "Enviando o conteúdo…";
+      const body = JSON.stringify(st.content);
+      let sha = null;
+      try {
+        const cur = await syncGh("/repos/" + repo + "/contents/content.json?ref=" + encodeURIComponent(branch), token);
+        sha = cur && cur.sha;
+      } catch (e) { /* arquivo novo */ }
+      const put = { message: "atualizar conteúdo do site", content: syncB64(body), branch };
+      if (sha) put.sha = sha;
+      await syncGh("/repos/" + repo + "/contents/content.json", token, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(put)
+      });
+      sel.textContent = "Sincronizado! Todos já veem o novo conteúdo.";
+      toastFn("Alterações enviadas ao GitHub.");
+    } catch (e) {
+      sel.textContent = "Não foi: " + (e && e.message ? e.message : e);
+    }
+    btn.disabled = false;
+  });
+};
 
 window.root = Object.assign(window.root || {}, {
   defaultContent: () => M_content.defaultContent(),
@@ -8791,16 +8886,23 @@ function setEditHint(html) {
   if (h) h.innerHTML = html;
 }
 
+function isStandalone() {
+  return !!(R && R.uploadPlugin && R.uploadPlugin.isStandalone);
+}
+
 function buildEditBar() {
   const bar = document.createElement("div");
   bar.className = "editbar";
   bar.id = "editbar";
+  const solo = isStandalone();
   bar.innerHTML = `
     ${EDIT_HINT}
-    <button class="tbtn" data-act="copy">Copiar p/ main.pjs</button>
+    ${solo
+      ? `<button class="tbtn" data-act="sync">Sincronizar GitHub</button>`
+      : `<button class="tbtn" data-act="copy">Copiar p/ main.pjs</button>`}
     <button class="tbtn" data-act="export">Exportar .json</button>
     <button class="tbtn" data-act="import">Importar</button>
-    <button class="tbtn" data-act="publish">Publicar no GitHub</button>
+    ${solo ? `` : `<button class="tbtn" data-act="publish">Publicar no GitHub</button>`}
     <button class="tbtn danger" data-act="reset">Restaurar padrão</button>`;
   document.body.appendChild(bar);
   bar.addEventListener("click", (ev) => {
@@ -8810,6 +8912,10 @@ function buildEditBar() {
     if (a === "copy") copyPjs();
     else if (a === "export") exportJson();
     else if (a === "import") importJson();
+    else if (a === "sync") {
+      if (window.__brasaSync) window.__brasaSync();
+      else toast("Sincronização indisponível nesta cópia.");
+    }
     else if (a === "publish") {
       Promise.resolve(M_publish).then((m) => m.openPublish({ content: state.content, toast })).catch((e) => toast("Não abriu a publicação."));
     }
@@ -8945,6 +9051,15 @@ async function init() {
     return;
   }
   state.defaults = clone(R.defaultContent());
+  if (isStandalone()) {
+    try {
+      const rr = await fetch("content.json", { cache: "no-store" });
+      if (rr.ok) {
+        const remote = await rr.json();
+        if (remote && remote.site && remote.roster) state.defaults = deepMerge(state.defaults, remote);
+      }
+    } catch (e) { }
+  }
   state.content = clone(state.defaults);
   let stale = false;
   try {
@@ -9161,6 +9276,101 @@ async function standaloneUpload(data, opts) {
   const url = await fileToDataUrl(blob, 1024);
   return { url, size: blob.size || url.length, error: null, deletionUrl: null };
 }
+standaloneUpload.isStandalone = true;
+window.__brasaStandalone = true;
+
+/* Sincronizar de volta: manda o conteúdo atual (o que está no navegador)
+   para o content.json do repositório. O token fica SÓ neste navegador
+   (mesma caixinha do "Publicar no GitHub") — nunca no código. */
+function syncB64(str) {
+  const u8 = new TextEncoder().encode(str);
+  let s = "";
+  const CH = 0x8000;
+  for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+  return btoa(s);
+}
+
+async function syncGh(path, token, opts) {
+  const o = opts || {};
+  const r = await fetch("https://api.github.com" + path, {
+    method: o.method || "GET",
+    body: o.body,
+    headers: Object.assign({
+      Accept: "application/vnd.github+json",
+      Authorization: "Bearer " + token,
+      "X-GitHub-Api-Version": "2022-11-28"
+    }, o.headers || {})
+  });
+  let data = null;
+  try { data = await r.json(); } catch (e) { }
+  if (!r.ok) throw new Error("HTTP " + r.status + ": " + ((data && data.message) || ("HTTP " + r.status)));
+  return data;
+}
+
+window.__brasaSync = async function () {
+  const toastFn = (window.brasa && window.brasa.toast) || ((m) => alert(m));
+  const st = (window.brasa && window.brasa.state) || null;
+  if (!st || !st.content) { toastFn("Abra o site primeiro."); return; }
+  let cfg = {};
+  try { cfg = JSON.parse(localStorage.getItem("brasa.github") || "{}"); } catch (e) { }
+  const r = document.getElementById("modalRoot");
+  const escAttr = (s) => String(s == null ? "" : s).replace(/[<>&"]/g, "");
+  r.innerHTML =
+    '<div class="modal" role="dialog">' +
+      '<h3>Sincronizar com o GitHub</h3>' +
+      '<p>Envia as edições feitas aqui para o <b>content.json</b> do repositório — aí todos os visitantes veem o novo conteúdo. O token fica <b>só neste navegador</b>.</p>' +
+      '<div class="pub-form">' +
+        '<label>Repositório (dono/nome)<input id="syncRepo" value="' + escAttr(cfg.repo) + '" autocomplete="off"></label>' +
+        '<label>Token de acesso<input id="syncToken" type="password" value="' + escAttr(cfg.token) + '" autocomplete="off"></label>' +
+      '</div>' +
+      '<div class="pub-status" id="syncStatus"></div>' +
+      '<div class="modal-actions">' +
+        '<button class="btn btn-ghost btn-sm" id="syncCancel">Fechar</button>' +
+        '<button class="btn btn-primary btn-sm" id="syncGo">Enviar alterações</button>' +
+      '</div>' +
+    '</div>';
+  r.classList.add("on");
+  const close = () => { r.classList.remove("on"); r.innerHTML = ""; };
+  document.getElementById("syncCancel").addEventListener("click", close);
+  r.onmousedown = (ev) => { if (ev.target === r) close(); };
+  document.getElementById("syncGo").addEventListener("click", async () => {
+    const repo = (document.getElementById("syncRepo").value || "").trim();
+    const token = (document.getElementById("syncToken").value || "").trim();
+    const sel = document.getElementById("syncStatus");
+    try { localStorage.setItem("brasa.github", JSON.stringify({ repo, token })); } catch (e) { }
+    if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) { sel.textContent = "Confira o repositório: use o formato dono/nome."; return; }
+    if (!token) { sel.textContent = "Cole o token."; return; }
+    const btn = document.getElementById("syncGo");
+    btn.disabled = true;
+    try {
+      sel.textContent = "Localizando o repositório…";
+      let branch = "main";
+      try {
+        const info = await syncGh("/repos/" + repo, token);
+        if (info && info.default_branch) branch = info.default_branch;
+      } catch (e) { /* segue no main */ }
+      sel.textContent = "Enviando o conteúdo…";
+      const body = JSON.stringify(st.content);
+      let sha = null;
+      try {
+        const cur = await syncGh("/repos/" + repo + "/contents/content.json?ref=" + encodeURIComponent(branch), token);
+        sha = cur && cur.sha;
+      } catch (e) { /* arquivo novo */ }
+      const put = { message: "atualizar conteúdo do site", content: syncB64(body), branch };
+      if (sha) put.sha = sha;
+      await syncGh("/repos/" + repo + "/contents/content.json", token, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(put)
+      });
+      sel.textContent = "Sincronizado! Todos já veem o novo conteúdo.";
+      toastFn("Alterações enviadas ao GitHub.");
+    } catch (e) {
+      sel.textContent = "Não foi: " + (e && e.message ? e.message : e);
+    }
+    btn.disabled = false;
+  });
+};
 
 window.root = Object.assign(window.root || {}, {
   defaultContent: () => M_content.defaultContent(),
@@ -9298,8 +9508,10 @@ async function build(opts) {
 
   /* conteúdo: objeto pronto (publicação com as edições atuais) ou extração do main.pjs */
   let contentSrc;
+  let contentJson = null;
   if (o.contentOverride !== undefined && o.contentOverride !== null) {
     contentSrc = "export function defaultContent() {\n  return " + JSON.stringify(o.contentOverride) + ";\n}\n";
+    contentJson = JSON.stringify(o.contentOverride);
     if (writeText) { try { await writeText("scratch/build/content.js", contentSrc); } catch (e) { } }
   } else {
     const mainPjs = await readText("main.pjs");
@@ -9380,7 +9592,7 @@ ${js}
 </body>
 </html>
 `;
-  return html;
+  return { html, contentJson };
 }
 
 return { build: build };
@@ -9467,8 +9679,8 @@ function normalizeRepo(input) {
   return s;
 }
 
-async function buildHtml(content) {
-  return build({
+async function buildSite(content) {
+  const out = await build({
     readText: async (p) => {
       const rr = await fetch(p);
       if (!rr.ok) throw new Error("não achei " + p + " (HTTP " + rr.status + ")");
@@ -9481,15 +9693,20 @@ async function buildHtml(content) {
     },
     contentOverride: content
   });
+  return out && out.html !== undefined ? out : { html: out, contentJson: null };
+}
+
+function downloadText(name, text, type) {
+  const blob = new Blob([text], { type: type || "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 
 function downloadHtml(html) {
-  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "index.html";
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  downloadText("index.html", html, "text/html;charset=utf-8");
 }
 
 /* ---- publicação com imagens: index.html + pasta assets/ ---- */
@@ -9628,9 +9845,15 @@ function openPublish(ctx) {
   document.getElementById("pubDl").addEventListener("click", async () => {
     setBusy(true);
     try {
-      setStatus("Gerando o arquivo…");
-      downloadHtml(await buildHtml(content));
-      setStatus("Baixado! Dá para subir manual: no repo, <b>Add file → Upload files</b> e arraste o index.html.");
+      setStatus("Gerando os arquivos…");
+      const site = await buildSite(content);
+      downloadHtml(site.html);
+      if (site.contentJson) {
+        downloadText("content.json", site.contentJson, "application/json");
+        setStatus("Baixados <b>index.html + content.json</b>! Suba os dois na raiz do repo (e a pasta assets/, se marcou a opção).");
+      } else {
+        setStatus("Baixado! Dá para subir manual: no repo, <b>Add file → Upload files</b> e arraste o index.html.");
+      }
     } catch (e) {
       setStatus("<b>Falhou:</b> " + escHtml(e && e.message ? e.message : e));
     }
@@ -9646,7 +9869,7 @@ function openPublish(ctx) {
     setBusy(true);
     try {
       setStatus("Gerando o site…");
-      let html = null;
+      let site = null;
       let assetsMsg = "";
       const wantAssets = document.getElementById("pubAssets") && document.getElementById("pubAssets").checked;
       let branch = "main";
@@ -9677,14 +9900,15 @@ function openPublish(ctx) {
         if (okN < urls.length) assetsMsg += " (" + (urls.length - okN) + " continuam remotas)";
         assetsMsg += ". ";
         setStatus("Imagens prontas (" + assetsMsg.trim() + "). Gerando o site…");
-        html = await buildHtml(rewritten);
+        site = await buildSite(rewritten);
         for (let k = 0; k < assets.length; k++) {
           setStatus("Enviando imagens… " + (k + 1) + "/" + assets.length);
           await putFile(f.repo, f.token, branch, assets[k].path, assets[k].b64, "adicionar imagem do site");
         }
       } else {
-        html = await buildHtml(content);
+        site = await buildSite(content);
       }
+      const html = site.html;
       const kb = Math.round(new TextEncoder().encode(html).length / 102.4) / 10;
       setStatus("Site gerado (" + kb + " KB). " + (assetsMsg ? assetsMsg : "") + "Enviando index.html…");
       const path = "index.html";
@@ -9704,8 +9928,12 @@ function openPublish(ctx) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
       });
+      if (site.contentJson) {
+        setStatus("index.html enviado. Enviando content.json…");
+        await putFile(f.repo, f.token, branch, "content.json", b64encode(site.contentJson), "atualizar conteúdo do site");
+      }
       const url = (done && done.content && done.content.html_url) || ("https://github.com/" + f.repo);
-      setStatus("<b>No ar (quase)!</b> <a href=\"" + escHtml(url) + "\" target=\"_blank\" rel=\"noopener\">ver no GitHub</a><br>Falta só: no repo, <b>Settings → Pages</b>, branch <b>" + escHtml(branch) + "</b>, salvar.");
+      setStatus("<b>No ar (quase)!</b> <a href=\"" + escHtml(url) + "\" target=\"_blank\" rel=\"noopener\">ver no GitHub</a><br>Falta só: no repo, <b>Settings → Pages</b>, branch <b>" + escHtml(branch) + "</b>, salvar.<br>Edições feitas lá no site voltam para o repo pelo botão <b>Sincronizar GitHub</b> da barra de edição.");
       toast("Site publicado no GitHub.");
     } catch (e) {
       const raw = e && e.message ? e.message : String(e);
