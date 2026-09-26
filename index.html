@@ -1714,7 +1714,8 @@ window.__brasaSync = async function () {
     const token = (document.getElementById("syncToken").value || "").trim();
     const sel = document.getElementById("syncStatus");
     try { localStorage.setItem("brasa.github", JSON.stringify({ repo, token })); } catch (e) { }
-    if (!/^[^/s]+/[^/s]+$/.test(repo)) { sel.textContent = "Confira o repositório: use o formato dono/nome."; return; }
+    const rp = String(repo).split("/");
+    if (rp.length !== 2 || !rp[0] || !rp[1] || repo.indexOf(" ") >= 0) { sel.textContent = "Confira o repositório: use o formato dono/nome."; return; }
     if (!token) { sel.textContent = "Cole o token."; return; }
     const btn = document.getElementById("syncGo");
     btn.disabled = true;
@@ -9338,7 +9339,8 @@ window.__brasaSync = async function () {
     const token = (document.getElementById("syncToken").value || "").trim();
     const sel = document.getElementById("syncStatus");
     try { localStorage.setItem("brasa.github", JSON.stringify({ repo, token })); } catch (e) { }
-    if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) { sel.textContent = "Confira o repositório: use o formato dono/nome."; return; }
+    const rp = String(repo).split("/");
+    if (rp.length !== 2 || !rp[0] || !rp[1] || repo.indexOf(" ") >= 0) { sel.textContent = "Confira o repositório: use o formato dono/nome."; return; }
     if (!token) { sel.textContent = "Cole o token."; return; }
     const btn = document.getElementById("syncGo");
     btn.disabled = true;
